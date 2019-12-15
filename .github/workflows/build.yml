@@ -1,0 +1,47 @@
+name: Build package
+
+on:
+  repository_dispatch
+  
+jobs:
+  build_package:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Get request
+        run: |
+          if [ "${{github.event.action}}" != "build" ]; then false; fi
+      - name: Install deps
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm base-devel git
+          pacman -Scc --noconfirm
+      - uses: actions/checkout@master
+      - name: Configure archlinux
+        run: |
+          echo 'MAKEFLAGS="-j3"' >> /etc/makepkg.conf
+          useradd -m -G wheel -s /bin/bash pkguser
+          echo "%wheel ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/wheel
+          mkdir -p /home/pkguser/pkg
+          cp -r ./* /home/pkguser/pkg
+          chown -R pkguser:pkguser /home/pkguser/*
+          cd /home/pkguser
+          su pkguser -s "/usr/bin/bash" -c "git clone https://aur.archlinux.org/pikaur.git"
+          cd pikaur
+          su pkguser -s "/usr/bin/bash" -c "makepkg -sir --noconfirm"
+          su pkguser -s "/usr/bin/bash" -c "pikaur -S --noconfirm gothub"
+      - name: Build package
+        run: |
+          cd /home/pkguser/pkg
+          su pkguser -s "/usr/bin/bash" -c "pikaur --noconfirm --mflags=--skippgpcheck -Pw PKGBUILD"
+      - name: Upload package
+        run: |
+          cd /home/pkguser/pkg
+          su pkguser -s "/usr/bin/bash" -c "gothub delete --user Arch-Auto-Deploy --repo ${REPO##*/} --tag repo" || true
+          su pkguser -s "/usr/bin/bash" -c "gothub release --user Arch-Auto-Deploy --repo ${REPO##*/} --tag repo --name Repo"
+          su pkguser -s "/usr/bin/bash" -c 'PKGS=$(cat .SRCINFO | grep "pkgname = " | sed "s/pkgname = //") && for pkg in $PKGS; do gothub upload --user Arch-Auto-Deploy --repo ${REPO##*/} --tag repo --name $(basename $(ls ~/.cache/pikaur/pkg/$pkg-*-*-*.pkg.tar.xz)) --file ~/.cache/pikaur/pkg/$pkg-*-*-*.pkg.tar.xz; done'
+          su pkguser -s "/usr/bin/bash" -c 'PKGS=$(cat .SRCINFO | grep "pkgname = " | sed "s/pkgname = //") && for pkg in $PKGS; do curl -H "Authorization: token $GITHUB_TOKEN" -H  "Accept: application/vnd.github.everest-preview+json" -X POST --data "{\"event_type\":\"addrepo\",\"client_payload\":{\"url\":\"https://github.com/Arch-Auto-Deploy/${REPO##*/}/releases/download/repo/$(basename $(ls ~/.cache/pikaur/pkg/$pkg-*-*-*.pkg.tar.xz))\"}}" https://api.github.com/repos/Arch-Auto-Deploy/Deploy-Manager/dispatches; done'
+        env:
+          GITHUB_TOKEN: ${{github.event.client_payload.token}}
+          REPO: ${{github.repository}}
